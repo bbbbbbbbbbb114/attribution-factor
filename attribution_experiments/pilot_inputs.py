@@ -112,6 +112,9 @@ def prepare(config_path: Path, output: Path) -> dict:
     validate_budget(config["budget"], len(config["splits"]["train"]))
     if config["models"] != MODELS:
         raise ValueError(f"This pilot uses {MODELS}")
+    for key in ("task_model_extra_body", "optimizer_extra_body"):
+        if not isinstance(config.get(key, {}), dict):
+            raise ValueError(f"{key} must be a JSON object")
     paths = source_paths(config, config_path.resolve().parent)
     missing = [str(path) for path in paths.values() if not path.exists()]
     if missing:
@@ -127,6 +130,7 @@ def prepare(config_path: Path, output: Path) -> dict:
     manifest = {"protocol": "rq1_pilot_v1", "evidence_protocol": position.PROTOCOL,
                 "models": config["models"], "splits": config["splits"], "groups": list(GROUPS), "budget": config["budget"],
                 "task_model_extra_body": config.get("task_model_extra_body", {}),
+                "optimizer_extra_body": config.get("optimizer_extra_body", {}),
                 "paths": {key: str(value) for key, value in paths.items()},
                 "source_sha256": sources, "inputs_sha256": position.digest(inputs_raw),
                 "anchor_statistics": stats}

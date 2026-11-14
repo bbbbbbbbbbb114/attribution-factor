@@ -35,7 +35,8 @@ def main() -> None:
                        "ATTRIBUTION_REFERENCE_TRACE": manifest["paths"]["reference_trace"],
                        "ATTRIBUTION_ANALYSIS_ROOT": manifest["paths"]["analysis_root"],
                        "ATTRIBUTION_TASK_IDS": str(args.bundle.resolve() / "train_ids.txt"),
-                       "TASK_MODEL_EXTRA_BODY": json.dumps(manifest["task_model_extra_body"])})
+                       "TASK_MODEL_EXTRA_BODY": json.dumps(manifest["task_model_extra_body"]),
+                       "OPTIMIZER_EXTRA_BODY": json.dumps(manifest["optimizer_extra_body"])})
     # A shared provider key can be supplied through the launching process.
     shared_key = os.environ.get("ALIYUN_API_KEY")
     if shared_key:

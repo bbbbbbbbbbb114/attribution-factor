@@ -37,6 +37,13 @@ def task_api_key() -> str:
     return key
 
 
+def optimizer_extra_body() -> dict:
+    body = json.loads(os.environ.get("OPTIMIZER_EXTRA_BODY", "{}"))
+    if not isinstance(body, dict):
+        raise ValueError("OPTIMIZER_EXTRA_BODY must be a JSON object")
+    return body
+
+
 def task_model_kwargs(*, api_key: str, temperature: float = TASK_TEMPERATURE) -> dict:
     """Return portable OpenAI-compatible settings and optional provider parameters."""
     extra_body = json.loads(os.environ.get("TASK_MODEL_EXTRA_BODY", "{}"))

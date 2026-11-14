@@ -36,6 +36,7 @@ from attribution_experiments.common.model_config import (
     TASK_MODEL,
     TASK_STEP_LIMIT,
     optimizer_api_key,
+    optimizer_extra_body,
     task_api_key,
 )
 from attribution_experiments.common.runner import load_original_config, run_task
@@ -460,6 +461,8 @@ def main() -> None:
             parser.error('Launch arguments differ from the frozen pilot budget')
         if json.loads(os.environ.get('TASK_MODEL_EXTRA_BODY', '{}')) != pilot['task_model_extra_body']:
             parser.error('Task-model request parameters differ from the frozen pilot inputs')
+        if optimizer_extra_body() != pilot['optimizer_extra_body']:
+            parser.error('Optimizer request parameters differ from the frozen pilot inputs')
         split_instances = load_instances(pilot)
         trainset, valset, final_instances = (split_instances[key] for key in ('train', 'dev', 'pilot_eval'))
         adaptation_instances = trainset + valset
@@ -473,9 +476,11 @@ def main() -> None:
             (run_dir / 'h0_manifest.json').write_text(json.dumps({
                 'models': pilot['models'], 'sources': pilot['source_sha256'],
                 'splits': pilot['splits'], 'step_limit': step_limit, 'seed': args.seed,
+                'task_model_extra_body': pilot['task_model_extra_body'],
                 'optimizer_calls': 0}, indent=2))
-            evaluate_final(build_seed_candidate(), final_instances, run_dir, task_key, step_limit, args.final_workers)
-            evaluate_final(build_seed_candidate(), trainset, run_dir / 'historical_recovery', task_key, step_limit, args.final_workers)
+            final = evaluate_final(build_seed_candidate(), final_instances, run_dir, task_key, step_limit, args.final_workers)
+            recovery = evaluate_final(build_seed_candidate(), trainset, run_dir / 'historical_recovery', task_key, step_limit, args.final_workers)
+            print(json.dumps({'h0': True, 'final': final, 'historical_recovery': recovery}, indent=2))
             return
     else:
         analysis_payloads = load_payloads(args.ablation_group, args.payload_root.resolve())
@@ -535,7 +540,8 @@ def main() -> None:
     if pilot:
         budget.update({'pilot_inputs_sha256': pilot['inputs_sha256'], 'pilot_eval_ids': pilot['splits']['pilot_eval'],
                        'source_sha256': pilot['source_sha256'], 'models': pilot['models'], 'seed': args.seed,
-                       'task_model_extra_body': pilot['task_model_extra_body']})
+                       'task_model_extra_body': pilot['task_model_extra_body'],
+                       'optimizer_extra_body': pilot['optimizer_extra_body']})
     pin_budget(run_dir, budget, has_progress=(run_dir / 'engine').exists() or any((run_dir / 'metric_calls').glob('*/result.json')))
     record_execution_backend(run_dir)
     snapshot_payloads(run_dir, args.ablation_group, analysis_payloads)
@@ -577,6 +583,7 @@ def main() -> None:
         temperature=1.0,
         max_tokens=8192,
         reasoning_effort="none",
+        extra_body=optimizer_extra_body(),
     )
     seed_artifact = build_seed_candidate()
     result = optimize_anything(
@@ -662,13 +669,15 @@ def main() -> None:
         "optimizer_model": OPTIMIZER_MODEL,
         "analysis_json_injected": args.ablation_group != "baseline",
         "analysis_payloads_injected_at": (
-            "none" if args.ablation_group == "baseline" else "GEPA reflection side_info as trusted evidence"
+            "none" if args.ablation_group == "baseline" else
+            "GEPA reflection side_info as historical position evidence" if pilot else
+            "GEPA reflection side_info as trusted evidence"
         ),
         "candidate_encoding": "sparse YAML overlay resolved against the original scaffold",
-        "adaptation_protocol": "repository_balanced_explicit_split_v2",
+        "adaptation_protocol": "rq1_pilot_disjoint_v1" if pilot else "repository_balanced_explicit_split_v2",
         "adaptation_tasks": len(adaptation_instances),
         "adaptation_task_ids": [x["instance_id"] for x in adaptation_instances],
-        "adaptation_seed": args.adaptation_seed,
+        "adaptation_seed": None if pilot else args.adaptation_seed,
         "candidate_surface": {
             "agent": list(AGENT_TEXT_FIELDS),
             "model": list(MODEL_TEXT_FIELDS),
@@ -685,9 +694,11 @@ def main() -> None:
     }
     (run_dir / "evolution_summary.json").write_text(json.dumps(summary, indent=2))
 
-    evaluate_final(best_artifact, final_instances, run_dir, task_key, step_limit, args.final_workers)
+    final = evaluate_final(best_artifact, final_instances, run_dir, task_key, step_limit, args.final_workers)
+    report = {'evolution': summary, 'final': final}
     if pilot:
-        evaluate_final(best_artifact, trainset, run_dir / 'historical_recovery', task_key, step_limit, args.final_workers)
+        report['historical_recovery'] = evaluate_final(best_artifact, trainset, run_dir / 'historical_recovery', task_key, step_limit, args.final_workers)
+    print(json.dumps(report, indent=2))
 
 
 def evaluate_final(artifact, instances, run_dir, task_key, step_limit, workers):
@@ -720,7 +731,7 @@ def evaluate_final(artifact, instances, run_dir, task_key, step_limit, workers):
         "results": final_results,
     }
     (run_dir / "final_summary.json").write_text(json.dumps(final_summary, indent=2))
-    print(json.dumps({"final": final_summary}, indent=2))
+    return final_summary
 
 
 if __name__ == "__main__":

@@ -7,9 +7,20 @@ import json
 import os
 from pathlib import Path
 import sys
+import uuid
 
 from .pilot_inputs import MODELS, read_json
 from .common import position_evidence as position
+
+
+def parse_annotation(text: str) -> dict:
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("Annotation response contains no JSON object; inspect the retained raw response")
+    annotation, _ = json.JSONDecoder().raw_decode(text[start:])
+    if not isinstance(annotation, dict) or annotation.get("classification") not in ("confirmed_agent_failure", "uncertain"):
+        raise ValueError("Annotation must declare confirmed_agent_failure or uncertain")
+    return annotation
 
 
 def main() -> None:
@@ -36,7 +47,7 @@ def main() -> None:
         os.environ.setdefault("OPTIMIZER_API_KEY", os.environ["ALIYUN_API_KEY"])
     from .common.runner import run_task
     from .common.result_validity import retryable_result
-    from .common.model_config import optimizer_api_key, OPTIMIZER_BASE_URL
+    from .common.model_config import optimizer_api_key, optimizer_extra_body, OPTIMIZER_BASE_URL
     from gepa.lm import LM
     import pyarrow.parquet as pq
 
@@ -80,11 +91,15 @@ Return only JSON.
                    "messages": transcript, "evaluation": result["evaluation"],
                    "reference_harness": read_json(args.reference_trace)["info"]["config"]["agent"]}, ensure_ascii=False)
     model = LM("openai/" + MODELS["optimizer"], api_key=optimizer_api_key(), api_base=OPTIMIZER_BASE_URL,
-               temperature=1.0, max_tokens=8192, reasoning_effort="none")
+               temperature=1.0, max_tokens=8192, reasoning_effort="none",
+               extra_body=optimizer_extra_body() or {"enable_thinking": False})
     text = model(prompt).strip()
-    if text.startswith("```"):
-        text = "\n".join(text.splitlines()[1:-1])
-    annotation = json.loads(text)
+    response_dir = args.output.resolve() / "annotation_responses" / args.task_id
+    response_dir.mkdir(parents=True, exist_ok=True)
+    (response_dir / (uuid.uuid4().hex + ".json")).write_text(json.dumps({
+        "model": MODELS["optimizer"], "response": text,
+        "input_tokens": model.total_tokens_in, "output_tokens": model.total_tokens_out}, ensure_ascii=False, indent=2), encoding="utf-8")
+    annotation = parse_annotation(text)
     annotation.update({"schema_version": "2.0", "trace": {"path": str(trace_path)},
                        "review_status": "llm_preannotation_pending_independent_review",
                        "annotation_model": MODELS["optimizer"], "task_model": MODELS["task"],

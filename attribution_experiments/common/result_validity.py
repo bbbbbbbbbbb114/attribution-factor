@@ -22,6 +22,8 @@ RETRYABLE_MARKERS = (
     "workspace synchronization failed",
     "container stopped or disappeared",
     "overdue-payment",
+    "allocated quota exceeded",
+    "throttling.allocationquota",
 )
 
 

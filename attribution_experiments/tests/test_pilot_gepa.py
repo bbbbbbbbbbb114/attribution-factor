@@ -45,6 +45,8 @@ def pilot_run(tmp_path, monkeypatch):
     monkeypatch.setattr(native, "task_api_key", lambda: "offline-task-key")
     monkeypatch.setattr(native, "optimizer_api_key", lambda: "offline-optimizer-key")
     monkeypatch.setenv("EXPERIMENT_CONTAINER_BACKEND", "local_docker")
+    monkeypatch.setenv("TASK_MODEL_EXTRA_BODY", "{}")
+    monkeypatch.setenv("OPTIMIZER_EXTRA_BODY", "{}")
     calls, prompts = [], []
 
     def fake_task(*, instance, output_dir, **kwargs):

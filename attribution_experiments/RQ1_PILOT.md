@@ -45,6 +45,8 @@ export OPTIMIZER_BASE_URL=YOUR_OPENAI_COMPATIBLE_ENDPOINT
 
 将 `TASK_MODEL_API_KEY` 和 `OPTIMIZER_API_KEY` 注入进程环境。也可用进程中的 `ALIYUN_API_KEY` 作为共用凭据。端点和密钥放在本地环境配置中。
 
+请求参数随 bundle 冻结。示例将任务输出上限设为 4096 token，将 DeepSeek 的 `enable_thinking` 设为 false。原始标注响应与 token 用量保存在 `annotation_responses/`，便于解析失败后复核。遇到服务配额错误时按基础设施失败处理。当前本机启动脚本暂用单并发与每分钟 300,000 token 的请求门控，实际服务配额仍需以供应商设置为准。
+
 新增 `local_docker` 后端可直接使用已经导入的官方镜像。它按镜像摘要启动容器，沿用共享 Agent 的动作、观察和提交处理，通过 stdin 传递补丁与评测脚本。容器停止后保留文件与镜像供检查。用户自行安排保留资源的清理。
 
 ## 检查与运行
