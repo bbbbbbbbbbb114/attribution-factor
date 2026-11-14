@@ -14,3 +14,6 @@ attribution_experiments/payloads_position_v1/
 attribution_experiments/task_ids.txt
 data/
 *.log
+.codex-tmp/
+outputs/optimize_anything/
+attribution_experiments/gepa/*/rq1_*/
