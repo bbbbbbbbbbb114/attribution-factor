@@ -541,7 +541,12 @@ def main() -> None:
         budget.update({'pilot_inputs_sha256': pilot['inputs_sha256'], 'pilot_eval_ids': pilot['splits']['pilot_eval'],
                        'source_sha256': pilot['source_sha256'], 'models': pilot['models'], 'seed': args.seed,
                        'task_model_extra_body': pilot['task_model_extra_body'],
-                       'optimizer_extra_body': pilot['optimizer_extra_body']})
+                       'optimizer_extra_body': pilot['optimizer_extra_body'],
+                       'evolution_workers': args.evolution_workers, 'final_workers': args.final_workers,
+                       'request_gate_environment': {key: os.environ[key] for key in (
+                           'TASK_MODEL_TPM_LIMIT', 'TASK_MODEL_TPM_UTILIZATION', 'TASK_MODEL_MAX_IN_FLIGHT',
+                           'TASK_MODEL_MIN_REQUEST_INTERVAL_SECONDS', 'TASK_MODEL_TOKEN_RESERVATION'
+                       ) if key in os.environ}})
     pin_budget(run_dir, budget, has_progress=(run_dir / 'engine').exists() or any((run_dir / 'metric_calls').glob('*/result.json')))
     record_execution_backend(run_dir)
     snapshot_payloads(run_dir, args.ablation_group, analysis_payloads)

@@ -45,7 +45,15 @@ export OPTIMIZER_BASE_URL=YOUR_OPENAI_COMPATIBLE_ENDPOINT
 
 将 `TASK_MODEL_API_KEY` 和 `OPTIMIZER_API_KEY` 注入进程环境。也可用进程中的 `ALIYUN_API_KEY` 作为共用凭据。端点和密钥放在本地环境配置中。
 
-请求参数随 bundle 冻结。示例将任务输出上限设为 4096 token，将 DeepSeek 的 `enable_thinking` 设为 false。原始标注响应与 token 用量保存在 `annotation_responses/`，便于解析失败后复核。遇到服务配额错误时按基础设施失败处理。当前本机启动脚本暂用单并发与每分钟 300,000 token 的请求门控，实际服务配额仍需以供应商设置为准。
+请求参数随 bundle 冻结。示例将任务输出上限设为 4096 token，将 DeepSeek 的 `enable_thinking` 设为 false。原始标注响应与 token 用量保存在 `annotation_responses/`，便于解析失败后复核。遇到服务配额错误时按基础设施失败处理。
+
+初步实验使用 `rq1-throughput.env` 中的吞吐配置。Qwen 同时在途请求上限为 4，滚动 60 秒 token 预算为 1,000,000，使用比例为 100%，请求最小间隔为 0.1 秒。每个请求先预留 131,072 token，响应后按实际用量结算。任务执行与评测的 worker 数均为 3，当前 WSL 约 7.4 GiB 内存，每个容器上限为 2 GiB。
+
+```bash
+. attribution_experiments/rq1-throughput.env
+```
+
+`rq1_pilot` 将 `GEPA_EVOLUTION_WORKERS` 和 `GEPA_FINAL_WORKERS` 传入原生 GEPA，命令行也支持 `--evolution-workers`、`--final-workers`。预检查输出实际 worker 数。每个运行会记录该并发配置和请求门控参数，续跑时校验一致性。候选依赖前轮结果，优化提案按 GEPA 原生顺序推进。
 
 新增 `local_docker` 后端可直接使用已经导入的官方镜像。它按镜像摘要启动容器，沿用共享 Agent 的动作、观察和提交处理，通过 stdin 传递补丁与评测脚本。容器停止后保留文件与镜像供检查。用户自行安排保留资源的清理。
 

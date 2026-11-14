@@ -19,7 +19,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--initial-only", action="store_true")
     parser.add_argument("--run", action="store_true", help="Execute after preflight passes")
+    parser.add_argument("--evolution-workers", type=int, default=os.environ.get("GEPA_EVOLUTION_WORKERS", "1"))
+    parser.add_argument("--final-workers", type=int, default=os.environ.get("GEPA_FINAL_WORKERS", "1"))
     args = parser.parse_args()
+    if args.evolution_workers < 1 or args.final_workers < 1:
+        parser.error("Worker counts must be positive")
     if args.initial_only and args.group != "baseline":
         parser.error("H0 uses the baseline group")
     manifest, _, _ = load_bundle(args.bundle.resolve(), args.group)
@@ -67,6 +71,7 @@ def main() -> None:
     report = {"ready": not blockers, "blockers": blockers, "models": manifest["models"],
               "split_sizes": {key: len(value) for key, value in manifest["splits"].items()},
               "budget": budget, "group": args.group, "seed": args.seed,
+              "parallelism": {"evolution_workers": args.evolution_workers, "final_workers": args.final_workers},
               "initial_only": args.initial_only, "checks": "local inputs and dependencies"}
     print(json.dumps(report, indent=2), flush=True)
     if blockers:
@@ -80,7 +85,9 @@ def main() -> None:
                 "--run-name", name, "--pilot-bundle", str(args.bundle.resolve()),
                 "--seed", str(args.seed), "--step-limit", str(budget["step_limit"]),
                 "--max-candidate-proposals", str(budget["max_candidate_proposals"]),
-                "--reflection-batch-size", str(budget["reflection_batch_size"])]
+                "--reflection-batch-size", str(budget["reflection_batch_size"]),
+                "--evolution-workers", str(args.evolution_workers),
+                "--final-workers", str(args.final_workers)]
     if args.initial_only:
         sys.argv.append("--initial-only")
     run_native.main()
