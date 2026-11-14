@@ -1,0 +1,21 @@
+{
+  "models": {
+    "task": "qwen3.6-35b-a3b",
+    "optimizer": "deepseek-v4.1-flash-1017"
+  },
+  "parquet": "../data/pilot/tasks.parquet",
+  "reference_trace": "../data/pilot/reference.traj.json",
+  "analysis_root": "../data/pilot/analysis",
+  "task_model_extra_body": {"max_tokens": 4096},
+  "splits": {
+    "train": [],
+    "dev": [],
+    "pilot_eval": []
+  },
+  "budget": {
+    "max_candidate_proposals": 4,
+    "reflection_batch_size": 3,
+    "step_limit": 250,
+    "seeds": [42, 43, 44]
+  }
+}

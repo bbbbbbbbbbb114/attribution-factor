@@ -1,0 +1,9 @@
+litellm==1.91.5
+swebench==3.0.17
+pyarrow==26.0.1
+PyYAML==6.0.3
+Jinja2==3.1.6
+pydantic==2.14.3
+cloudpickle==3.1.2
+tqdm==4.70.1
+pytest==9.2.0

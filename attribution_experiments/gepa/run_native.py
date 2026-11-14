@@ -60,14 +60,14 @@ def build_seed_candidate() -> str:
     )
 
 
-def build_reflection_prompt_template() -> str:
+def build_reflection_prompt_template(*, position_only: bool = False) -> str:
     original = load_original_config()
     base_scaffold = {
         "agent": {key: original["agent"][key] for key in AGENT_TEXT_FIELDS},
         "model": {key: original["model"][key] for key in MODEL_TEXT_FIELDS},
     }
     rendered_base = yaml.safe_dump(base_scaffold, sort_keys=False, width=10000)
-    return f"""You are optimizing the complete mutable text scaffold of mini-swe-agent.
+    prompt = f"""You are optimizing the complete mutable text scaffold of mini-swe-agent.
 
 Optimization goal: improve SWE-bench solve rate for a fixed task model
 model using the existing bash tool and submission protocol.
@@ -117,6 +117,14 @@ Return ONLY the YAML overlay inside one fenced code block. No explanation outsid
 the block. The top-level mapping has exactly two sections, agent and model. Use
 {{}} for an unchanged section, for example "agent: {{}}". Do not append extra
 closing braces after the top-level mapping."""
+    if position_only:
+        from attribution_experiments.common.position_evidence import INSTRUCTIONS
+        start = prompt.index('A "Provided Failure Analysis" section')
+        end = prompt.index('Propose one general improvement', start)
+        prompt = prompt[:start] + INSTRUCTIONS + '\n\n' + prompt[end:]
+    return prompt
+
+
 def parse_candidate(candidate: str) -> dict[str, dict[str, str]]:
     text = candidate.strip()
     if text.startswith("```"):
@@ -252,12 +260,14 @@ class NativeEvaluator:
         step_limit: int,
         analysis_payloads: dict[str, dict] | None = None,
         metric_replay: MetricReplay | None = None,
+        historical_traces: dict[str, dict] | None = None,
     ):
         self.output_dir = output_dir
         self.api_key = api_key
         self.step_limit = step_limit
         self.analysis_payloads = analysis_payloads or {}
         self.metric_replay = metric_replay
+        self.historical_traces = historical_traces or {}
         self._counter = 0
         self._lock = threading.Lock()
         self.evaluated_candidates: set[str] = set()
@@ -333,10 +343,13 @@ class NativeEvaluator:
             f"{test_output[:500]}...{test_output[-500:]}" if len(test_output) > 1000 else test_output
         )
         info = {}
+        if instance["instance_id"] in self.historical_traces:
+            info["Original Historical Training Trace"] = self.historical_traces[instance["instance_id"]]
         payload = self.analysis_payloads.get(instance["instance_id"])
         visible = model_visible_payload(payload) if payload is not None else {}
         if visible:
-            info["Provided Failure Analysis (Trusted Evidence)"] = visible
+            label = "Provided Historical Position Evidence" if self.historical_traces else "Provided Failure Analysis (Trusted Evidence)"
+            info[label] = visible
             from attribution_experiments.common.flow_evidence import has_flow, packet
             if has_flow(payload):
                 info["Provided Failure Analysis (Trusted Evidence)"] = {
@@ -395,32 +408,85 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--resume-metrics-from", type=Path)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--pilot-bundle", type=Path,
+                        help="Frozen RQ1 train/dev/pilot_eval inputs")
+    parser.add_argument("--initial-only", action="store_true",
+                        help="Independently evaluate H0 on pilot_eval without optimization")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--step-limit", type=int, default=TASK_STEP_LIMIT)
     args = parser.parse_args()
     if args.evolution_workers < 1:
         parser.error("--evolution-workers must be at least 1")
     if args.final_workers < 1:
         parser.error("--final-workers must be at least 1")
-    if args.adaptation_tasks < 2:
+    if not args.pilot_bundle and args.adaptation_tasks < 2:
         parser.error("--adaptation-tasks must be at least 2")
-    if not args.full_trace_pass and not 1 <= args.train_tasks < args.adaptation_tasks:
+    if not args.pilot_bundle and not args.full_trace_pass and not 1 <= args.train_tasks < args.adaptation_tasks:
         parser.error('--train-tasks must be positive and smaller than --adaptation-tasks')
-    if not 1 <= args.reflection_batch_size <= (args.adaptation_tasks if args.full_trace_pass else args.train_tasks):
+    if not args.pilot_bundle and not 1 <= args.reflection_batch_size <= (args.adaptation_tasks if args.full_trace_pass else args.train_tasks):
         parser.error('--reflection-batch-size must be between 1 and --train-tasks')
     if args.max_candidate_proposals < 2:
         parser.error("--max-candidate-proposals must be at least 2")
-    optimizer_key = optimizer_api_key()
+    if Path(args.run_name).name != args.run_name or args.run_name in ("", ".", ".."):
+        parser.error("--run-name must be a single directory name")
+    if args.step_limit < 1:
+        parser.error("--step-limit must be positive")
+    if args.initial_only and (not args.pilot_bundle or args.ablation_group != "baseline"):
+        parser.error("--initial-only requires --pilot-bundle and the baseline group")
+    if args.initial_only and args.resume:
+        parser.error("Use a fresh H0 run directory for an independent rerun")
+    if args.pilot_bundle and (args.smoke or args.full_trace_pass or args.resume_metrics_from):
+        parser.error("Pilot bundles require fresh disjoint data and independent metrics")
+    optimizer_key = optimizer_api_key() if not args.initial_only else None
     task_key = task_api_key()
 
     run_dir = RUN_ROOT / args.ablation_group / args.run_name
     if run_dir.exists() and any(run_dir.iterdir()) and not args.resume:
         raise RuntimeError("GEPA evolution requires a fresh run directory; preserve old results and use a new --run-name")
     from attribution_experiments.common.execution_protocol import record_execution_backend
-    analysis_payloads = load_payloads(args.ablation_group, args.payload_root.resolve())
+    historical_traces = {}
+    pilot = None
+    if args.pilot_bundle:
+        from attribution_experiments.pilot_inputs import load_bundle, load_instances
+        from attribution_experiments.common.runner import REFERENCE_TRACE
+        pilot, analysis_payloads, historical_traces = load_bundle(args.pilot_bundle, args.ablation_group)
+        if pilot['models'] != {'task': TASK_MODEL, 'optimizer': OPTIMIZER_MODEL}:
+            parser.error('Model environment differs from frozen pilot models')
+        if Path(pilot['paths']['reference_trace']).resolve() != REFERENCE_TRACE.resolve():
+            parser.error('Set ATTRIBUTION_REFERENCE_TRACE to the frozen pilot reference trace before launch')
+        actual_budget = {'max_candidate_proposals': args.max_candidate_proposals,
+                         'reflection_batch_size': args.reflection_batch_size, 'step_limit': args.step_limit}
+        if any(value != pilot['budget'][key] for key, value in actual_budget.items()) or args.seed not in pilot['budget']['seeds']:
+            parser.error('Launch arguments differ from the frozen pilot budget')
+        if json.loads(os.environ.get('TASK_MODEL_EXTRA_BODY', '{}')) != pilot['task_model_extra_body']:
+            parser.error('Task-model request parameters differ from the frozen pilot inputs')
+        split_instances = load_instances(pilot)
+        trainset, valset, final_instances = (split_instances[key] for key in ('train', 'dev', 'pilot_eval'))
+        adaptation_instances = trainset + valset
+        instances = adaptation_instances + final_instances
+        step_limit = args.step_limit
+        if args.reflection_batch_size > len(trainset):
+            parser.error('--reflection-batch-size exceeds pilot training count')
+        if args.initial_only:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            record_execution_backend(run_dir)
+            (run_dir / 'h0_manifest.json').write_text(json.dumps({
+                'models': pilot['models'], 'sources': pilot['source_sha256'],
+                'splits': pilot['splits'], 'step_limit': step_limit, 'seed': args.seed,
+                'optimizer_calls': 0}, indent=2))
+            evaluate_final(build_seed_candidate(), final_instances, run_dir, task_key, step_limit, args.final_workers)
+            evaluate_final(build_seed_candidate(), trainset, run_dir / 'historical_recovery', task_key, step_limit, args.final_workers)
+            return
+    else:
+        analysis_payloads = load_payloads(args.ablation_group, args.payload_root.resolve())
     from attribution_experiments.common.flow_evidence import write_receipt
-    instances = load_failed_instances()
+    if not args.pilot_bundle:
+        instances = load_failed_instances()
     if args.full_trace_pass and (args.smoke or args.adaptation_tasks != len(instances)):
         parser.error('--full-trace-pass requires all 148 tasks and a non-smoke run')
-    if args.smoke:
+    if args.pilot_bundle:
+        pass
+    elif args.smoke:
         adaptation_instances = instances[:2]
         trainset, valset = adaptation_instances[:1], adaptation_instances[1:]
         step_limit = 3
@@ -451,12 +517,12 @@ def main() -> None:
             trainset, valset = split_adaptation(adaptation_instances, args.train_tasks,
                                               validation_offset=args.validation_offset,
                                               validation_tasks=args.validation_tasks)
-        step_limit = TASK_STEP_LIMIT
+        step_limit = args.step_limit
         final_instances = instances
 
     reflection_batch_size = 1 if args.smoke else args.reflection_batch_size
     from attribution_experiments.common.optimization_budget import pin_budget
-    pin_budget(run_dir, {
+    budget = {
         'protocol': 'gepa_checkpoint_budget_v3', 'group': args.ablation_group,
         'train_ids': [x['instance_id'] for x in trainset],
         'val_ids': [x['instance_id'] for x in valset],
@@ -465,7 +531,12 @@ def main() -> None:
         'full_trace_pass': args.full_trace_pass,
         'batch_sampler': 'single_pass_unpadded_v1' if args.full_trace_pass else 'epoch_shuffled',
         'analysis_sha256': hashlib.sha256(json.dumps(analysis_payloads, sort_keys=True).encode()).hexdigest(),
-    }, has_progress=(run_dir / 'engine').exists() or any((run_dir / 'metric_calls').glob('*/result.json')))
+    }
+    if pilot:
+        budget.update({'pilot_inputs_sha256': pilot['inputs_sha256'], 'pilot_eval_ids': pilot['splits']['pilot_eval'],
+                       'source_sha256': pilot['source_sha256'], 'models': pilot['models'], 'seed': args.seed,
+                       'task_model_extra_body': pilot['task_model_extra_body']})
+    pin_budget(run_dir, budget, has_progress=(run_dir / 'engine').exists() or any((run_dir / 'metric_calls').glob('*/result.json')))
     record_execution_backend(run_dir)
     snapshot_payloads(run_dir, args.ablation_group, analysis_payloads)
     write_receipt(run_dir, analysis_payloads, 'native reflection side-info; historical/current evidence separated')
@@ -478,7 +549,7 @@ def main() -> None:
     if args.full_trace_pass:
         from .single_pass_sampler import SinglePassBatchSampler
         from .protocol import one_pass_metric_budget
-        batch_sampler = SinglePassBatchSampler(reflection_batch_size, seed=42)
+        batch_sampler = SinglePassBatchSampler(reflection_batch_size, seed=args.seed)
         max_metric_calls = one_pass_metric_budget(len(valset), len(trainset), reflection_batch_size)
     metric_replay = MetricReplay(
         args.resume_metrics_from, run_dir, model=TASK_MODEL, step_limit=step_limit
@@ -491,6 +562,7 @@ def main() -> None:
         step_limit=step_limit,
         analysis_payloads=analysis_payloads,
         metric_replay=metric_replay,
+        historical_traces=historical_traces,
     )
     if args.resume:
         from .protocol import prepare_engine_resume
@@ -521,13 +593,13 @@ def main() -> None:
                 parallel=True,
                 acceptance_criterion="strict_improvement",
                 write_agent_state=True,
-                seed=42,
+                seed=args.seed,
             ),
             reflection=ReflectionConfig(
                 reflection_lm=reflection_lm,
                 reflection_minibatch_size=reflection_batch_size,
                 batch_sampler=batch_sampler,
-                reflection_prompt_template=build_reflection_prompt_template(),
+                reflection_prompt_template=build_reflection_prompt_template(position_only=bool(pilot)),
                 skip_perfect_score=False,
             ),
             merge=None,
@@ -560,7 +632,8 @@ def main() -> None:
             for candidate in evaluator.evaluated_candidates
         } - {json.dumps(resolve_candidate(seed_artifact), sort_keys=True)}),
     }
-    require_completed_evolution(evolution_check)
+    if not pilot:
+        require_completed_evolution(evolution_check)
     if proposal_attempts < args.max_candidate_proposals:
         raise RuntimeError(
             f"GEPA stopped after {proposal_attempts} proposals; expected "
@@ -603,13 +676,25 @@ def main() -> None:
         },
         "train_ids": [x["instance_id"] for x in trainset],
         "val_ids": [x["instance_id"] for x in valset],
+        "final_ids": [x["instance_id"] for x in final_instances],
+        "seed": args.seed,
+        "pilot_protocol": pilot['protocol'] if pilot else None,
+        "optimizer_usage_this_process": {"input_tokens": reflection_lm.total_tokens_in,
+                            "output_tokens": reflection_lm.total_tokens_out,
+                            "reported_cost": reflection_lm.total_cost},
     }
     (run_dir / "evolution_summary.json").write_text(json.dumps(summary, indent=2))
 
+    evaluate_final(best_artifact, final_instances, run_dir, task_key, step_limit, args.final_workers)
+    if pilot:
+        evaluate_final(best_artifact, trainset, run_dir / 'historical_recovery', task_key, step_limit, args.final_workers)
+
+
+def evaluate_final(artifact, instances, run_dir, task_key, step_limit, workers):
     final_evaluator = NativeEvaluator(output_dir=run_dir / "final", api_key=task_key, step_limit=step_limit)
 
     def final_rollout(instance: dict) -> dict:
-        score, info = final_evaluator(best_artifact, instance)
+        score, info = final_evaluator(artifact, instance)
         return {
             "instance_id": instance["instance_id"],
             "resolved": bool(score),
@@ -617,25 +702,25 @@ def main() -> None:
         }
 
     final_results_by_id = {}
-    with ThreadPoolExecutor(max_workers=args.final_workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(final_rollout, instance): instance["instance_id"]
-            for instance in final_instances
+            for instance in instances
         }
         for future in as_completed(futures):
             task_id = futures[future]
             final_results_by_id[task_id] = future.result()
     final_results = [
-        final_results_by_id[item["instance_id"]] for item in final_instances
+        final_results_by_id[item["instance_id"]] for item in instances
     ]
     final_summary = {
         "resolved": sum(item["resolved"] for item in final_results),
         "total": len(final_results),
-        "workers": args.final_workers,
+        "workers": workers,
         "results": final_results,
     }
     (run_dir / "final_summary.json").write_text(json.dumps(final_summary, indent=2))
-    print(json.dumps({"evolution": summary, "final": final_summary}, indent=2))
+    print(json.dumps({"final": final_summary}, indent=2))
 
 
 if __name__ == "__main__":
